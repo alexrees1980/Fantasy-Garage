@@ -697,7 +697,6 @@ def build_garage(game: Dict[str, Any], player: Dict[str, Any]) -> None:
                         st.link_button(
                             "Open advert",
                             item["advert_url"],
-                            key=f"shortlist_link_{item['id']}",
                         )
                 with c2:
                     st.metric(
