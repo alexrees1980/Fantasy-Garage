@@ -2,6 +2,12 @@ import hashlib
 import hmac
 import mimetypes
 import secrets
+import ipaddress
+import socket
+from urllib.parse import urljoin, urlparse
+
+import requests
+from bs4 import BeautifulSoup
 from typing import Any, Dict, List, Optional
 
 import streamlit as st
@@ -146,6 +152,151 @@ def get_valuations(game_id: str) -> List[Dict[str, Any]]:
         .data
         or []
     )
+
+
+
+def is_safe_public_url(url: str) -> bool:
+    """Allow only ordinary public HTTP(S) URLs."""
+    try:
+        parsed = urlparse(url.strip())
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            return False
+
+        addresses = socket.getaddrinfo(parsed.hostname, None)
+        for address in addresses:
+            ip = ipaddress.ip_address(address[4][0])
+            if (
+                ip.is_private
+                or ip.is_loopback
+                or ip.is_link_local
+                or ip.is_multicast
+                or ip.is_reserved
+                or ip.is_unspecified
+            ):
+                return False
+        return True
+    except Exception:
+        return False
+
+
+def read_limited_response(response, max_bytes: int) -> bytes:
+    chunks = []
+    size = 0
+    for chunk in response.iter_content(chunk_size=65536):
+        if not chunk:
+            continue
+        size += len(chunk)
+        if size > max_bytes:
+            raise ValueError("Remote file is too large.")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def extract_lead_image_url(advert_url: str) -> Optional[str]:
+    """Best-effort extraction using common advert-page metadata."""
+    if not is_safe_public_url(advert_url):
+        return None
+
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (compatible; FantasyGarage/1.0; "
+            "+https://streamlit.app)"
+        )
+    }
+
+    try:
+        with requests.get(
+            advert_url,
+            headers=headers,
+            timeout=10,
+            allow_redirects=True,
+            stream=True,
+        ) as response:
+            response.raise_for_status()
+            content_type = response.headers.get("content-type", "").lower()
+            if "text/html" not in content_type:
+                return None
+            html = read_limited_response(response, 2_000_000).decode(
+                response.encoding or "utf-8",
+                errors="replace",
+            )
+
+        soup = BeautifulSoup(html, "html.parser")
+        candidates = []
+
+        for attrs in (
+            {"property": "og:image"},
+            {"property": "og:image:secure_url"},
+            {"name": "twitter:image"},
+            {"name": "twitter:image:src"},
+        ):
+            tag = soup.find("meta", attrs=attrs)
+            if tag and tag.get("content"):
+                candidates.append(tag["content"].strip())
+
+        if not candidates:
+            image = soup.find("img", src=True)
+            if image:
+                candidates.append(image["src"].strip())
+
+        for candidate in candidates:
+            resolved = urljoin(advert_url, candidate)
+            if is_safe_public_url(resolved):
+                return resolved
+    except Exception:
+        return None
+
+    return None
+
+
+def upload_remote_image(
+    game_code: str,
+    player_id: str,
+    image_url: str,
+) -> Optional[str]:
+    """Download a public image and store it in the private Supabase bucket."""
+    if not image_url or not is_safe_public_url(image_url):
+        return None
+
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (compatible; FantasyGarage/1.0; "
+            "+https://streamlit.app)"
+        )
+    }
+
+    try:
+        with requests.get(
+            image_url,
+            headers=headers,
+            timeout=12,
+            allow_redirects=True,
+            stream=True,
+        ) as response:
+            response.raise_for_status()
+            mime = response.headers.get("content-type", "").split(";")[0].lower()
+            if mime not in {"image/jpeg", "image/png", "image/webp"}:
+                return None
+            data = read_limited_response(response, 10_000_000)
+
+        extension = {
+            "image/jpeg": ".jpg",
+            "image/png": ".png",
+            "image/webp": ".webp",
+        }[mime]
+        path = (
+            f"{game_code}/{player_id}/"
+            f"imported-{secrets.token_hex(8)}{extension}"
+        )
+
+        supabase.storage.from_(BUCKET_NAME).upload(
+            path=path,
+            file=data,
+            file_options={"content-type": mime, "upsert": "true"},
+        )
+        return path
+    except Exception:
+        return None
 
 
 def update_game(game_id: str, values: Dict[str, Any]) -> None:
@@ -687,6 +838,15 @@ def build_garage(game: Dict[str, Any], player: Dict[str, Any]) -> None:
             with st.container(border=True):
                 c1, c2, c3 = st.columns([2, 1, 1])
                 with c1:
+                    image_url = item.get("source_image_url")
+                    image_path = item.get("image_path")
+                    if image_path:
+                        stored_url = signed_image_url(image_path)
+                        if stored_url:
+                            st.image(stored_url, use_container_width=True)
+                    elif image_url:
+                        st.image(image_url, use_container_width=True)
+
                     st.write(f"**{item['vehicle_name']}**")
                     details = [
                         str(item["vehicle_year"]) if item.get("vehicle_year") else "",
@@ -694,15 +854,43 @@ def build_garage(game: Dict[str, Any], player: Dict[str, Any]) -> None:
                     ]
                     st.caption(" · ".join(filter(None, details)))
                     if item.get("advert_url"):
-                        st.link_button(
-                            "Open advert",
-                            item["advert_url"],
-                        )
+                        st.link_button("Open advert", item["advert_url"])
+
                 with c2:
                     st.metric(
                         "Price",
                         money(game, item.get("advertised_price") or 0),
                     )
+
+                    if item.get("advert_url") and not item.get("source_image_url"):
+                        if st.button(
+                            "Find advert image",
+                            key=f"find_image_{item['id']}",
+                            use_container_width=True,
+                        ):
+                            with st.spinner("Checking the advert page..."):
+                                found_url = extract_lead_image_url(item["advert_url"])
+                            if found_url:
+                                supabase.table("shortlist_items").update(
+                                    {
+                                        "source_image_url": found_url,
+                                        "import_status": "partial",
+                                    }
+                                ).eq("id", item["id"]).execute()
+                                st.success("Lead image found.")
+                                st.rerun()
+                            else:
+                                st.warning(
+                                    "The advert did not expose a usable lead image. "
+                                    "Upload one manually below."
+                                )
+
+                    manual_image = st.file_uploader(
+                        "Upload image",
+                        type=["jpg", "jpeg", "png", "webp"],
+                        key=f"shortlist_upload_{item['id']}",
+                    )
+
                 with c3:
                     add_disabled = (
                         player["garage_submitted"]
@@ -714,6 +902,22 @@ def build_garage(game: Dict[str, Any], player: Dict[str, Any]) -> None:
                         disabled=add_disabled,
                         use_container_width=True,
                     ):
+                        final_image_path = item.get("image_path")
+
+                        if manual_image:
+                            final_image_path = upload_image(
+                                game["game_code"],
+                                player["id"],
+                                manual_image,
+                            )
+                        elif not final_image_path and item.get("source_image_url"):
+                            with st.spinner("Saving the advert image..."):
+                                final_image_path = upload_remote_image(
+                                    game["game_code"],
+                                    player["id"],
+                                    item["source_image_url"],
+                                )
+
                         vehicle_data = {
                             "game_id": game["id"],
                             "player_id": player["id"],
@@ -729,7 +933,7 @@ def build_garage(game: Dict[str, Any], player: Dict[str, Any]) -> None:
                             "vehicle_location": item.get("vehicle_location") or "",
                             "is_project": bool(item.get("is_project")),
                             "private_notes": item.get("advert_description") or "",
-                            "image_path": item.get("image_path"),
+                            "image_path": final_image_path,
                         }
                         errors = validate_vehicle(game, vehicles, vehicle_data)
                         if errors:
