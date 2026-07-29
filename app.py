@@ -1011,49 +1011,73 @@ def build_garage(game: Dict[str, Any], player: Dict[str, Any]) -> None:
 
         with quick_tab:
             st.caption(
-                "Paste the advert link first. Fantasy Garage will try to fill "
-                "the vehicle details and lead image for you."
+                "Paste the advert link, then either continue with quick manual "
+                "entry or try the optional automatic importer."
             )
 
             import_key = f"imported_listing_{game['id']}_{player['id']}"
 
-            with st.form("import_advert_url"):
+            with st.form("start_shortlist_capture"):
                 shortlist_url = st.text_input(
                     "Advert URL",
                     placeholder="https://...",
                 )
-                import_advert = st.form_submit_button(
-                    "Import advert",
+                c1, c2 = st.columns(2)
+                quick_entry = c1.form_submit_button(
+                    "Continue manually",
                     type="primary",
+                    use_container_width=True,
+                )
+                try_import = c2.form_submit_button(
+                    "Try to import details",
+                    use_container_width=True,
                 )
 
-            if import_advert:
+            if quick_entry or try_import:
                 if not shortlist_url.strip():
                     st.error("Paste an advert URL first.")
                 elif not is_safe_public_url(shortlist_url):
                     st.error("Enter a valid public http or https advert URL.")
                 else:
-                    with st.spinner("Reading the advert..."):
-                        imported = extract_listing_data(shortlist_url.strip())
+                    if try_import:
+                        with st.spinner("Trying to read the advert..."):
+                            imported = extract_listing_data(shortlist_url.strip())
+                        if imported["import_status"] == "failed":
+                            st.info(
+                                "This site blocked or did not expose its advert "
+                                "details. Complete the quick form below instead."
+                            )
+                    else:
+                        imported = {
+                            "vehicle_name": "",
+                            "vehicle_year": None,
+                            "advertised_price": None,
+                            "vehicle_location": "",
+                            "advert_type": "Private",
+                            "advert_description": "",
+                            "source_website": urlparse(
+                                shortlist_url.strip()
+                            ).netloc.lower().removeprefix("www."),
+                            "source_image_url": "",
+                            "import_status": "manual",
+                        }
+
                     imported["advert_url"] = shortlist_url.strip()
                     st.session_state[import_key] = imported
-
-                    if imported["import_status"] == "failed":
-                        st.warning(
-                            "The site did not expose its advert details. "
-                            "The link has been retained so you can complete "
-                            "the fields manually."
-                        )
-                    else:
-                        st.success(
-                            "Advert imported. Check the details below before saving."
-                        )
                     st.rerun()
 
             imported = st.session_state.get(import_key)
 
             if imported:
-                st.subheader("Review imported advert")
+                imported_ok = imported.get("import_status") in {
+                    "imported",
+                    "partial",
+                }
+                st.subheader(
+                    "Review imported advert"
+                    if imported_ok
+                    else "Quick shortlist entry"
+                )
 
                 image_url = imported.get("source_image_url")
                 if image_url:
@@ -1061,11 +1085,6 @@ def build_garage(game: Dict[str, Any], player: Dict[str, Any]) -> None:
                         image_url,
                         caption="Imported lead image",
                         width=420,
-                    )
-                else:
-                    st.info(
-                        "No lead image was found. You can upload one after "
-                        "saving the item or before moving it to the garage."
                     )
 
                 default_year = imported.get("vehicle_year")
@@ -1087,10 +1106,11 @@ def build_garage(game: Dict[str, Any], player: Dict[str, Any]) -> None:
                     else 0
                 )
 
-                with st.form("review_imported_advert"):
+                with st.form("review_shortlist_capture"):
                     vehicle_name = st.text_input(
                         "Year, make and model",
                         value=imported.get("vehicle_name") or "",
+                        placeholder="1974 Alfa Romeo GTV",
                     )
 
                     c1, c2 = st.columns(2)
@@ -1108,28 +1128,39 @@ def build_garage(game: Dict[str, Any], player: Dict[str, Any]) -> None:
                         value=int(default_year),
                     )
 
-                    c1, c2 = st.columns(2)
-                    vehicle_location = c1.text_input(
-                        "Location",
-                        value=imported.get("vehicle_location") or "",
-                    )
-                    advert_type = c2.selectbox(
-                        "Advert type",
-                        advert_types,
-                        index=type_index,
+                    shortlist_image = st.file_uploader(
+                        "Upload the advert's main image or a screenshot",
+                        type=["jpg", "jpeg", "png", "webp"],
+                        help=(
+                            "Recommended for sites that block automatic image "
+                            "import. This image will follow the car into the garage."
+                        ),
                     )
 
-                    description = st.text_area(
-                        "Advert description",
-                        value=imported.get("advert_description") or "",
-                        height=120,
-                    )
-
-                    source_image_url = st.text_input(
-                        "Lead image URL",
-                        value=imported.get("source_image_url") or "",
-                        help="Leave blank if no usable image was found.",
-                    )
+                    with st.expander("Optional details"):
+                        c1, c2 = st.columns(2)
+                        vehicle_location = c1.text_input(
+                            "Location",
+                            value=imported.get("vehicle_location") or "",
+                        )
+                        advert_type = c2.selectbox(
+                            "Advert type",
+                            advert_types,
+                            index=type_index,
+                        )
+                        description = st.text_area(
+                            "Advert description or notes",
+                            value=imported.get("advert_description") or "",
+                            height=100,
+                        )
+                        source_image_url = st.text_input(
+                            "Imported image URL",
+                            value=imported.get("source_image_url") or "",
+                            help=(
+                                "Optional. A manually uploaded screenshot takes "
+                                "priority over this URL."
+                            ),
+                        )
 
                     c1, c2 = st.columns(2)
                     save_import = c1.form_submit_button(
@@ -1138,7 +1169,7 @@ def build_garage(game: Dict[str, Any], player: Dict[str, Any]) -> None:
                         use_container_width=True,
                     )
                     cancel_import = c2.form_submit_button(
-                        "Cancel import",
+                        "Cancel",
                         use_container_width=True,
                     )
 
@@ -1152,6 +1183,14 @@ def build_garage(game: Dict[str, Any], player: Dict[str, Any]) -> None:
                             "Enter a vehicle name before saving it to the shortlist."
                         )
                     else:
+                        image_path = None
+                        if shortlist_image:
+                            image_path = upload_image(
+                                game["game_code"],
+                                player["id"],
+                                shortlist_image,
+                            )
+
                         supabase.table("shortlist_items").insert(
                             {
                                 "game_id": game["id"],
@@ -1167,9 +1206,10 @@ def build_garage(game: Dict[str, Any], player: Dict[str, Any]) -> None:
                                 "advert_description": description.strip(),
                                 "advert_type": advert_type,
                                 "is_project": False,
+                                "image_path": image_path,
                                 "source_image_url": source_image_url.strip(),
                                 "import_status": imported.get(
-                                    "import_status", "partial"
+                                    "import_status", "manual"
                                 ),
                             }
                         ).execute()

@@ -41,3 +41,17 @@ Players can paste an advert URL and the app will attempt to extract:
 All imported fields are shown in an editable review form before saving.
 Some websites may block or limit automated extraction, so manual completion
 and image upload remain available.
+
+
+## Quick-capture shortlist flow
+
+The shortlist now treats automatic extraction as optional:
+
+1. Paste the advert URL.
+2. Continue manually or try automatic import.
+3. Enter only the vehicle name and price.
+4. Upload the advert's main image or a screenshot.
+5. Save to the private shortlist.
+
+Automatic extraction remains available for compatible public sites but is no
+longer required for the workflow.
