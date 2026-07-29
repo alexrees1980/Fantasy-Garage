@@ -811,9 +811,13 @@ def create_game() -> None:
 
 def join_game() -> None:
     st.header("Join a game")
+
+    query_game = str(st.query_params.get("game", "")).strip().upper()
+    query_player = str(st.query_params.get("player", "")).strip()
+
     with st.form("join_game"):
-        code = st.text_input("Game code")
-        name = st.text_input("Player name")
+        code = st.text_input("Game code", value=query_game)
+        name = st.text_input("Player name", value=query_player)
         pin = st.text_input("Player PIN", type="password")
         submitted = st.form_submit_button("Join game", type="primary")
 
@@ -840,6 +844,7 @@ def join_game() -> None:
     st.session_state.game_id = game["id"]
     st.session_state.player_id = player["id"]
     st.session_state.is_organiser = bool(player["is_organiser"])
+    st.query_params.clear()
     st.rerun()
 
 
@@ -985,6 +990,166 @@ def show_vehicle(
                         pass
                 supabase.table("vehicles").delete().eq("id", vehicle["id"]).execute()
                 st.rerun()
+
+
+
+@st.fragment(run_every="5s")
+def live_shortlist(
+    game: Dict[str, Any],
+    player: Dict[str, Any],
+) -> None:
+    shortlist = get_shortlist_items(game["id"], player["id"])
+    vehicles = get_vehicles(game["id"], player["id"])
+
+    header_left, header_right = st.columns([3, 1])
+    with header_left:
+        st.subheader("Your shortlist")
+        st.caption(
+            "This list checks Supabase every five seconds while the page is open."
+        )
+    with header_right:
+        if st.button(
+            "Refresh now",
+            key="refresh_live_shortlist",
+            use_container_width=True,
+        ):
+            st.rerun(scope="fragment")
+
+    if not shortlist:
+        st.info(
+            "No shortlisted vehicles yet. Cars sent from the browser extension "
+            "will appear here automatically."
+        )
+        return
+
+    for item in shortlist:
+        with st.container(border=True):
+            c1, c2, c3 = st.columns([2, 1, 1])
+
+            with c1:
+                image_url = item.get("source_image_url")
+                image_path = item.get("image_path")
+
+                if image_path:
+                    stored_url = signed_image_url(image_path)
+                    if stored_url:
+                        st.image(stored_url, use_container_width=True)
+                elif image_url:
+                    st.image(image_url, use_container_width=True)
+
+                st.write(f"**{item['vehicle_name']}**")
+                details = [
+                    str(item["vehicle_year"]) if item.get("vehicle_year") else "",
+                    item.get("vehicle_location", ""),
+                ]
+                st.caption(" · ".join(filter(None, details)))
+
+                if item.get("advert_url"):
+                    st.link_button("Open advert", item["advert_url"])
+
+            with c2:
+                st.metric(
+                    "Price",
+                    money(game, item.get("advertised_price") or 0),
+                )
+
+                if item.get("advert_url") and not item.get("source_image_url"):
+                    if st.button(
+                        "Find advert image",
+                        key=f"find_image_{item['id']}",
+                        use_container_width=True,
+                    ):
+                        with st.spinner("Checking the advert page..."):
+                            found_url = extract_lead_image_url(item["advert_url"])
+
+                        if found_url:
+                            supabase.table("shortlist_items").update(
+                                {
+                                    "source_image_url": found_url,
+                                    "import_status": "partial",
+                                }
+                            ).eq("id", item["id"]).execute()
+                            st.success("Lead image found.")
+                            st.rerun(scope="fragment")
+                        else:
+                            st.warning(
+                                "The advert did not expose a usable lead image."
+                            )
+
+                manual_image = st.file_uploader(
+                    "Upload image",
+                    type=["jpg", "jpeg", "png", "webp"],
+                    key=f"shortlist_upload_{item['id']}",
+                )
+
+            with c3:
+                add_disabled = (
+                    player["garage_submitted"]
+                    or len(vehicles) >= int(game["vehicle_count"])
+                )
+
+                if st.button(
+                    "Add to garage",
+                    key=f"promote_{item['id']}",
+                    disabled=add_disabled,
+                    use_container_width=True,
+                ):
+                    final_image_path = item.get("image_path")
+
+                    if manual_image:
+                        final_image_path = upload_image(
+                            game["game_code"],
+                            player["id"],
+                            manual_image,
+                        )
+                    elif not final_image_path and item.get("source_image_url"):
+                        with st.spinner("Saving the advert image..."):
+                            final_image_path = upload_remote_image(
+                                game["game_code"],
+                                player["id"],
+                                item["source_image_url"],
+                            )
+
+                    vehicle_data = {
+                        "game_id": game["id"],
+                        "player_id": player["id"],
+                        "vehicle_name": item["vehicle_name"],
+                        "vehicle_year": int(
+                            item.get("vehicle_year") or game["minimum_year"]
+                        ),
+                        "purchase_price": float(
+                            item.get("advertised_price") or 0
+                        ),
+                        "advert_type": item.get("advert_type") or "Private",
+                        "advert_url": item.get("advert_url") or "",
+                        "vehicle_location": item.get("vehicle_location") or "",
+                        "is_project": bool(item.get("is_project")),
+                        "private_notes": item.get("advert_description") or "",
+                        "image_path": final_image_path,
+                    }
+
+                    errors = validate_vehicle(game, vehicles, vehicle_data)
+
+                    if errors:
+                        for error in errors:
+                            st.error(error)
+                    else:
+                        supabase.table("vehicles").insert(vehicle_data).execute()
+                        supabase.table("shortlist_items").delete().eq(
+                            "id", item["id"]
+                        ).execute()
+                        st.success("Vehicle moved to your garage.")
+                        st.rerun()
+
+                if st.button(
+                    "Remove",
+                    key=f"delete_shortlist_{item['id']}",
+                    use_container_width=True,
+                ):
+                    supabase.table("shortlist_items").delete().eq(
+                        "id", item["id"]
+                    ).execute()
+                    st.rerun(scope="fragment")
 
 
 def build_garage(game: Dict[str, Any], player: Dict[str, Any]) -> None:
@@ -1291,132 +1456,8 @@ def build_garage(game: Dict[str, Any], player: Dict[str, Any]) -> None:
             else:
                 st.info("Your garage already contains the required number of vehicles.")
 
-    if shortlist:
-        st.divider()
-        st.subheader("Your shortlist")
-
-        for item in shortlist:
-            with st.container(border=True):
-                c1, c2, c3 = st.columns([2, 1, 1])
-                with c1:
-                    image_url = item.get("source_image_url")
-                    image_path = item.get("image_path")
-                    if image_path:
-                        stored_url = signed_image_url(image_path)
-                        if stored_url:
-                            st.image(stored_url, use_container_width=True)
-                    elif image_url:
-                        st.image(image_url, use_container_width=True)
-
-                    st.write(f"**{item['vehicle_name']}**")
-                    details = [
-                        str(item["vehicle_year"]) if item.get("vehicle_year") else "",
-                        item.get("vehicle_location", ""),
-                    ]
-                    st.caption(" · ".join(filter(None, details)))
-                    if item.get("advert_url"):
-                        st.link_button("Open advert", item["advert_url"])
-
-                with c2:
-                    st.metric(
-                        "Price",
-                        money(game, item.get("advertised_price") or 0),
-                    )
-
-                    if item.get("advert_url") and not item.get("source_image_url"):
-                        if st.button(
-                            "Find advert image",
-                            key=f"find_image_{item['id']}",
-                            use_container_width=True,
-                        ):
-                            with st.spinner("Checking the advert page..."):
-                                found_url = extract_lead_image_url(item["advert_url"])
-                            if found_url:
-                                supabase.table("shortlist_items").update(
-                                    {
-                                        "source_image_url": found_url,
-                                        "import_status": "partial",
-                                    }
-                                ).eq("id", item["id"]).execute()
-                                st.success("Lead image found.")
-                                st.rerun()
-                            else:
-                                st.warning(
-                                    "The advert did not expose a usable lead image. "
-                                    "Upload one manually below."
-                                )
-
-                    manual_image = st.file_uploader(
-                        "Upload image",
-                        type=["jpg", "jpeg", "png", "webp"],
-                        key=f"shortlist_upload_{item['id']}",
-                    )
-
-                with c3:
-                    add_disabled = (
-                        player["garage_submitted"]
-                        or len(vehicles) >= int(game["vehicle_count"])
-                    )
-                    if st.button(
-                        "Add to garage",
-                        key=f"promote_{item['id']}",
-                        disabled=add_disabled,
-                        use_container_width=True,
-                    ):
-                        final_image_path = item.get("image_path")
-
-                        if manual_image:
-                            final_image_path = upload_image(
-                                game["game_code"],
-                                player["id"],
-                                manual_image,
-                            )
-                        elif not final_image_path and item.get("source_image_url"):
-                            with st.spinner("Saving the advert image..."):
-                                final_image_path = upload_remote_image(
-                                    game["game_code"],
-                                    player["id"],
-                                    item["source_image_url"],
-                                )
-
-                        vehicle_data = {
-                            "game_id": game["id"],
-                            "player_id": player["id"],
-                            "vehicle_name": item["vehicle_name"],
-                            "vehicle_year": int(
-                                item.get("vehicle_year") or game["minimum_year"]
-                            ),
-                            "purchase_price": float(
-                                item.get("advertised_price") or 0
-                            ),
-                            "advert_type": item.get("advert_type") or "Private",
-                            "advert_url": item.get("advert_url") or "",
-                            "vehicle_location": item.get("vehicle_location") or "",
-                            "is_project": bool(item.get("is_project")),
-                            "private_notes": item.get("advert_description") or "",
-                            "image_path": final_image_path,
-                        }
-                        errors = validate_vehicle(game, vehicles, vehicle_data)
-                        if errors:
-                            for error in errors:
-                                st.error(error)
-                        else:
-                            supabase.table("vehicles").insert(vehicle_data).execute()
-                            supabase.table("shortlist_items").delete().eq(
-                                "id", item["id"]
-                            ).execute()
-                            st.success("Vehicle moved to your garage.")
-                            st.rerun()
-
-                    if st.button(
-                        "Remove",
-                        key=f"delete_shortlist_{item['id']}",
-                        use_container_width=True,
-                    ):
-                        supabase.table("shortlist_items").delete().eq(
-                            "id", item["id"]
-                        ).execute()
-                        st.rerun()
+    st.divider()
+    live_shortlist(game, player)
 
     st.divider()
     st.subheader("Current garage")

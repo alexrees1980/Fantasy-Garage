@@ -55,3 +55,12 @@ The shortlist now treats automatic extraction as optional:
 
 Automatic extraction remains available for compatible public sites but is no
 longer required for the workflow.
+
+
+## Live shortlist update
+
+- The shortlist checks Supabase every five seconds.
+- A **Refresh now** button is also available.
+- Login links can prefill the game code and player name with:
+  `?game=ABC123&player=Alex`
+- The PIN is never included in the link or stored by this feature.
