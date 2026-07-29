@@ -123,6 +123,20 @@ def get_vehicles(game_id: str, player_id: Optional[str] = None) -> List[Dict[str
     return query.execute().data or []
 
 
+
+def get_shortlist_items(game_id: str, player_id: str) -> List[Dict[str, Any]]:
+    return (
+        supabase.table("shortlist_items")
+        .select("*")
+        .eq("game_id", game_id)
+        .eq("player_id", player_id)
+        .order("created_at", desc=True)
+        .execute()
+        .data
+        or []
+    )
+
+
 def get_valuations(game_id: str) -> List[Dict[str, Any]]:
     return (
         supabase.table("valuations")
@@ -517,6 +531,7 @@ def show_vehicle(
 def build_garage(game: Dict[str, Any], player: Dict[str, Any]) -> None:
     stats = garage_stats(game, player["id"])
     vehicles = stats["vehicles"]
+    shortlist = get_shortlist_items(game["id"], player["id"])
 
     rule_summary(game)
     st.header(f"{player['player_name']}'s garage")
@@ -528,75 +543,219 @@ def build_garage(game: Dict[str, Any], player: Dict[str, Any]) -> None:
         "Remaining",
         money(game, float(game["total_budget"]) - stats["spent"]),
     )
-    c4.metric("Projects", f"{stats['projects']} / {game['maximum_projects']}")
+    c4.metric("Shortlist", len(shortlist))
 
     if player["garage_submitted"]:
         st.success("Your garage is submitted and locked.")
-    elif len(vehicles) < int(game["vehicle_count"]):
-        with st.form("add_vehicle", clear_on_submit=True):
-            st.subheader(f"Add vehicle {len(vehicles) + 1}")
-            c1, c2 = st.columns(2)
-            name = c1.text_input("Year, make and model")
-            year = c1.number_input(
-                "Year",
-                min_value=1885,
-                max_value=2100,
-                value=max(
-                    int(game["minimum_year"]),
-                    min(int(game["maximum_year"]), 1980),
-                ),
-            )
-            price = c2.number_input(
-                "Advertised price",
-                min_value=0,
-                max_value=int(game["total_budget"]),
-                step=500,
-            )
-            advert_type = c2.selectbox(
-                "Advert type",
-                ["Private", "Dealer", "Auction", "Other"],
-            )
-            advert_url = st.text_input("Advert URL")
-            location = st.text_input("Vehicle location")
-            image = st.file_uploader(
-                "Main image or advert screenshot",
-                type=["jpg", "jpeg", "png", "webp"],
-            )
-            is_project = st.checkbox("Restoration project")
-            notes = st.text_area("Private notes")
-            submitted = st.form_submit_button("Add to garage", type="primary")
+    else:
+        quick_tab, manual_tab = st.tabs(["Save to shortlist", "Add directly to garage"])
 
-        if submitted:
-            vehicle_data = {
-                "game_id": game["id"],
-                "player_id": player["id"],
-                "vehicle_name": name.strip(),
-                "vehicle_year": int(year),
-                "purchase_price": float(price),
-                "advert_type": advert_type,
-                "advert_url": advert_url.strip(),
-                "vehicle_location": location.strip(),
-                "is_project": bool(is_project),
-                "private_notes": notes.strip(),
-                "image_path": None,
-            }
+        with quick_tab:
+            st.caption(
+                "Save promising adverts here while you compare options. "
+                "Nothing on the shortlist counts against your budget."
+            )
+            with st.form("quick_shortlist", clear_on_submit=True):
+                c1, c2 = st.columns(2)
+                shortlist_name = c1.text_input(
+                    "Year, make and model",
+                    placeholder="1974 Alfa Romeo GTV",
+                )
+                shortlist_price = c2.number_input(
+                    "Advertised price",
+                    min_value=0,
+                    max_value=int(game["total_budget"]),
+                    step=500,
+                )
+                shortlist_url = st.text_input("Advert URL")
+                c1, c2 = st.columns(2)
+                shortlist_year = c1.number_input(
+                    "Year",
+                    min_value=1885,
+                    max_value=2100,
+                    value=max(
+                        int(game["minimum_year"]),
+                        min(int(game["maximum_year"]), 1980),
+                    ),
+                )
+                shortlist_location = c2.text_input("Location")
+                save_shortlist = st.form_submit_button(
+                    "Save to shortlist",
+                    type="primary",
+                )
 
-            errors = validate_vehicle(game, vehicles, vehicle_data)
-            if errors:
-                for error in errors:
-                    st.error(error)
-            else:
-                if image:
-                    vehicle_data["image_path"] = upload_image(
-                        game["game_code"],
-                        player["id"],
-                        image,
+            if save_shortlist:
+                if not shortlist_name.strip():
+                    st.error("Enter the vehicle name.")
+                else:
+                    supabase.table("shortlist_items").insert(
+                        {
+                            "game_id": game["id"],
+                            "player_id": player["id"],
+                            "vehicle_name": shortlist_name.strip(),
+                            "vehicle_year": int(shortlist_year),
+                            "advertised_price": float(shortlist_price),
+                            "advert_url": shortlist_url.strip(),
+                            "vehicle_location": shortlist_location.strip(),
+                            "advert_type": "Private",
+                            "is_project": False,
+                            "import_status": "manual",
+                        }
+                    ).execute()
+                    st.success("Vehicle saved to your shortlist.")
+                    st.rerun()
+
+        with manual_tab:
+            if len(vehicles) < int(game["vehicle_count"]):
+                with st.form("add_vehicle", clear_on_submit=True):
+                    st.subheader(f"Add vehicle {len(vehicles) + 1}")
+                    c1, c2 = st.columns(2)
+                    name = c1.text_input("Year, make and model")
+                    price = c2.number_input(
+                        "Advertised price",
+                        min_value=0,
+                        max_value=int(game["total_budget"]),
+                        step=500,
                     )
-                supabase.table("vehicles").insert(vehicle_data).execute()
-                st.success("Vehicle added.")
-                st.rerun()
+                    advert_url = st.text_input("Advert URL")
+                    image = st.file_uploader(
+                        "Main image or advert screenshot",
+                        type=["jpg", "jpeg", "png", "webp"],
+                    )
+
+                    with st.expander("Additional details"):
+                        c1, c2 = st.columns(2)
+                        year = c1.number_input(
+                            "Year",
+                            min_value=1885,
+                            max_value=2100,
+                            value=max(
+                                int(game["minimum_year"]),
+                                min(int(game["maximum_year"]), 1980),
+                            ),
+                        )
+                        advert_type = c2.selectbox(
+                            "Advert type",
+                            ["Private", "Dealer", "Auction", "Other"],
+                        )
+                        location = st.text_input("Vehicle location")
+                        is_project = st.checkbox("Restoration project")
+                        notes = st.text_area("Private notes")
+
+                    submitted = st.form_submit_button(
+                        "Add to garage",
+                        type="primary",
+                    )
+
+                if submitted:
+                    vehicle_data = {
+                        "game_id": game["id"],
+                        "player_id": player["id"],
+                        "vehicle_name": name.strip(),
+                        "vehicle_year": int(year),
+                        "purchase_price": float(price),
+                        "advert_type": advert_type,
+                        "advert_url": advert_url.strip(),
+                        "vehicle_location": location.strip(),
+                        "is_project": bool(is_project),
+                        "private_notes": notes.strip(),
+                        "image_path": None,
+                    }
+
+                    errors = validate_vehicle(game, vehicles, vehicle_data)
+                    if errors:
+                        for error in errors:
+                            st.error(error)
+                    else:
+                        if image:
+                            vehicle_data["image_path"] = upload_image(
+                                game["game_code"],
+                                player["id"],
+                                image,
+                            )
+                        supabase.table("vehicles").insert(vehicle_data).execute()
+                        st.success("Vehicle added.")
+                        st.rerun()
+            else:
+                st.info("Your garage already contains the required number of vehicles.")
+
+    if shortlist:
+        st.divider()
+        st.subheader("Your shortlist")
+
+        for item in shortlist:
+            with st.container(border=True):
+                c1, c2, c3 = st.columns([2, 1, 1])
+                with c1:
+                    st.write(f"**{item['vehicle_name']}**")
+                    details = [
+                        str(item["vehicle_year"]) if item.get("vehicle_year") else "",
+                        item.get("vehicle_location", ""),
+                    ]
+                    st.caption(" · ".join(filter(None, details)))
+                    if item.get("advert_url"):
+                        st.link_button(
+                            "Open advert",
+                            item["advert_url"],
+                            key=f"shortlist_link_{item['id']}",
+                        )
+                with c2:
+                    st.metric(
+                        "Price",
+                        money(game, item.get("advertised_price") or 0),
+                    )
+                with c3:
+                    add_disabled = (
+                        player["garage_submitted"]
+                        or len(vehicles) >= int(game["vehicle_count"])
+                    )
+                    if st.button(
+                        "Add to garage",
+                        key=f"promote_{item['id']}",
+                        disabled=add_disabled,
+                        use_container_width=True,
+                    ):
+                        vehicle_data = {
+                            "game_id": game["id"],
+                            "player_id": player["id"],
+                            "vehicle_name": item["vehicle_name"],
+                            "vehicle_year": int(
+                                item.get("vehicle_year") or game["minimum_year"]
+                            ),
+                            "purchase_price": float(
+                                item.get("advertised_price") or 0
+                            ),
+                            "advert_type": item.get("advert_type") or "Private",
+                            "advert_url": item.get("advert_url") or "",
+                            "vehicle_location": item.get("vehicle_location") or "",
+                            "is_project": bool(item.get("is_project")),
+                            "private_notes": item.get("advert_description") or "",
+                            "image_path": item.get("image_path"),
+                        }
+                        errors = validate_vehicle(game, vehicles, vehicle_data)
+                        if errors:
+                            for error in errors:
+                                st.error(error)
+                        else:
+                            supabase.table("vehicles").insert(vehicle_data).execute()
+                            supabase.table("shortlist_items").delete().eq(
+                                "id", item["id"]
+                            ).execute()
+                            st.success("Vehicle moved to your garage.")
+                            st.rerun()
+
+                    if st.button(
+                        "Remove",
+                        key=f"delete_shortlist_{item['id']}",
+                        use_container_width=True,
+                    ):
+                        supabase.table("shortlist_items").delete().eq(
+                            "id", item["id"]
+                        ).execute()
+                        st.rerun()
 
     st.divider()
+    st.subheader("Current garage")
     for vehicle in vehicles:
         show_vehicle(
             game,
@@ -614,7 +773,6 @@ def build_garage(game: Dict[str, Any], player: Dict[str, Any]) -> None:
             {"garage_submitted": True}
         ).eq("id", player["id"]).execute()
         st.rerun()
-
 
 def reveal_page(game: Dict[str, Any]) -> None:
     rule_summary(game)
