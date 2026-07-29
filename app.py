@@ -3,6 +3,7 @@ import hmac
 import mimetypes
 import secrets
 import ipaddress
+import json
 import socket
 from urllib.parse import urljoin, urlparse
 
@@ -247,6 +248,313 @@ def extract_lead_image_url(advert_url: str) -> Optional[str]:
         return None
 
     return None
+
+
+
+def first_meta_content(soup: BeautifulSoup, selectors: List[Dict[str, str]]) -> str:
+    for attrs in selectors:
+        tag = soup.find("meta", attrs=attrs)
+        if tag and tag.get("content"):
+            return tag["content"].strip()
+    return ""
+
+
+def walk_json_ld(value):
+    if isinstance(value, dict):
+        yield value
+        for child in value.values():
+            yield from walk_json_ld(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from walk_json_ld(child)
+
+
+def clean_vehicle_title(title: str) -> str:
+    cleaned = re.sub(r"\s+", " ", title or "").strip()
+    cleaned = re.sub(
+        r"\s*[\|\-–—]\s*(for sale|used cars?|cars? for sale|marketplace).*$",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    return cleaned[:180]
+
+
+def parse_number(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+
+    text_value = str(value).strip()
+    if not text_value:
+        return None
+
+    matches = re.findall(r"\d[\d\s,.]*", text_value)
+    if not matches:
+        return None
+
+    number = matches[0].replace(" ", "")
+    if "," in number and "." in number:
+        if number.rfind(",") > number.rfind("."):
+            number = number.replace(".", "").replace(",", ".")
+        else:
+            number = number.replace(",", "")
+    elif "," in number:
+        parts = number.split(",")
+        if len(parts[-1]) in {1, 2}:
+            number = number.replace(",", ".")
+        else:
+            number = number.replace(",", "")
+
+    try:
+        return float(number)
+    except ValueError:
+        return None
+
+
+def infer_year(*values: Any) -> Optional[int]:
+    for value in values:
+        if value is None:
+            continue
+        match = re.search(r"\b(18[89]\d|19\d{2}|20\d{2}|2100)\b", str(value))
+        if match:
+            return int(match.group(1))
+    return None
+
+
+def extract_location_from_json(node: Dict[str, Any]) -> str:
+    for key in ("availableAtOrFrom", "areaServed", "location", "address"):
+        value = node.get(key)
+        if isinstance(value, str):
+            return value.strip()
+        if isinstance(value, dict):
+            address_parts = [
+                value.get("addressLocality"),
+                value.get("addressRegion"),
+                value.get("addressCountry"),
+                value.get("name"),
+            ]
+            location = ", ".join(
+                str(part).strip() for part in address_parts if part
+            )
+            if location:
+                return location
+    return ""
+
+
+def extract_listing_data(advert_url: str) -> Dict[str, Any]:
+    """Best-effort importer using JSON-LD, Open Graph and page metadata."""
+    result = {
+        "vehicle_name": "",
+        "vehicle_year": None,
+        "advertised_price": None,
+        "vehicle_location": "",
+        "advert_type": "Private",
+        "advert_description": "",
+        "source_website": "",
+        "source_image_url": "",
+        "import_status": "failed",
+    }
+
+    if not is_safe_public_url(advert_url):
+        return result
+
+    parsed_url = urlparse(advert_url)
+    result["source_website"] = parsed_url.netloc.lower().removeprefix("www.")
+
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (compatible; FantasyGarage/1.0; "
+            "+https://streamlit.app)"
+        )
+    }
+
+    try:
+        with requests.get(
+            advert_url,
+            headers=headers,
+            timeout=12,
+            allow_redirects=True,
+            stream=True,
+        ) as response:
+            response.raise_for_status()
+            content_type = response.headers.get("content-type", "").lower()
+            if "text/html" not in content_type:
+                return result
+
+            html = read_limited_response(response, 3_000_000).decode(
+                response.encoding or "utf-8",
+                errors="replace",
+            )
+    except Exception:
+        return result
+
+    soup = BeautifulSoup(html, "html.parser")
+
+    title = first_meta_content(
+        soup,
+        [
+            {"property": "og:title"},
+            {"name": "twitter:title"},
+        ],
+    )
+    if not title and soup.title:
+        title = soup.title.get_text(" ", strip=True)
+
+    description = first_meta_content(
+        soup,
+        [
+            {"property": "og:description"},
+            {"name": "description"},
+            {"name": "twitter:description"},
+        ],
+    )
+    image = extract_lead_image_url(advert_url) or ""
+
+    price = None
+    location = ""
+    json_name = ""
+    json_description = ""
+    json_image = ""
+
+    for script in soup.find_all("script", type="application/ld+json"):
+        raw = script.string or script.get_text()
+        if not raw.strip():
+            continue
+        try:
+            payload = json.loads(raw)
+        except Exception:
+            continue
+
+        for node in walk_json_ld(payload):
+            node_type = node.get("@type")
+            types = node_type if isinstance(node_type, list) else [node_type]
+            types = {str(item).lower() for item in types if item}
+
+            relevant = bool(
+                types.intersection(
+                    {
+                        "product",
+                        "vehicle",
+                        "car",
+                        "offer",
+                        "individualproduct",
+                        "itemlist",
+                    }
+                )
+            )
+            if not relevant:
+                continue
+
+            if not json_name and node.get("name"):
+                json_name = str(node["name"]).strip()
+            if not json_description and node.get("description"):
+                json_description = str(node["description"]).strip()
+
+            image_value = node.get("image")
+            if not json_image and image_value:
+                if isinstance(image_value, str):
+                    json_image = image_value
+                elif isinstance(image_value, list) and image_value:
+                    first_image = image_value[0]
+                    if isinstance(first_image, str):
+                        json_image = first_image
+                    elif isinstance(first_image, dict):
+                        json_image = str(
+                            first_image.get("url")
+                            or first_image.get("contentUrl")
+                            or ""
+                        )
+                elif isinstance(image_value, dict):
+                    json_image = str(
+                        image_value.get("url")
+                        or image_value.get("contentUrl")
+                        or ""
+                    )
+
+            offers = node.get("offers")
+            offer_nodes = offers if isinstance(offers, list) else [offers]
+            if "offer" in types:
+                offer_nodes.append(node)
+
+            for offer in offer_nodes:
+                if not isinstance(offer, dict):
+                    continue
+                if price is None:
+                    price = parse_number(
+                        offer.get("price")
+                        or offer.get("lowPrice")
+                        or offer.get("highPrice")
+                    )
+                if not location:
+                    location = extract_location_from_json(offer)
+
+            if not location:
+                location = extract_location_from_json(node)
+
+    if not price:
+        for selectors in (
+            [{"property": "product:price:amount"}],
+            [{"property": "og:price:amount"}],
+            [{"name": "price"}],
+            [{"itemprop": "price"}],
+        ):
+            value = first_meta_content(soup, selectors)
+            if value:
+                price = parse_number(value)
+                if price is not None:
+                    break
+
+    final_name = clean_vehicle_title(json_name or title)
+    final_description = (json_description or description or "").strip()[:3000]
+
+    final_image = image or json_image
+    if final_image:
+        final_image = urljoin(advert_url, final_image)
+        if not is_safe_public_url(final_image):
+            final_image = ""
+
+    year = infer_year(
+        final_name,
+        final_description,
+        soup.get_text(" ", strip=True)[:10000],
+    )
+
+    site_text = result["source_website"]
+    page_text = f"{final_name} {final_description}".lower()
+    if any(word in site_text for word in ("auction", "collectingcars", "bonhams")):
+        advert_type = "Auction"
+    elif any(word in page_text for word in ("dealer", "dealership", "stock no")):
+        advert_type = "Dealer"
+    else:
+        advert_type = "Private"
+
+    populated = sum(
+        [
+            bool(final_name),
+            price is not None,
+            year is not None,
+            bool(location),
+            bool(final_description),
+            bool(final_image),
+        ]
+    )
+
+    result.update(
+        {
+            "vehicle_name": final_name,
+            "vehicle_year": year,
+            "advertised_price": price,
+            "vehicle_location": location[:300],
+            "advert_type": advert_type,
+            "advert_description": final_description,
+            "source_image_url": final_image,
+            "import_status": "imported" if populated >= 4 else "partial",
+        }
+    )
+    return result
+
 
 
 def upload_remote_image(
@@ -703,58 +1011,171 @@ def build_garage(game: Dict[str, Any], player: Dict[str, Any]) -> None:
 
         with quick_tab:
             st.caption(
-                "Save promising adverts here while you compare options. "
-                "Nothing on the shortlist counts against your budget."
+                "Paste the advert link first. Fantasy Garage will try to fill "
+                "the vehicle details and lead image for you."
             )
-            with st.form("quick_shortlist", clear_on_submit=True):
-                c1, c2 = st.columns(2)
-                shortlist_name = c1.text_input(
-                    "Year, make and model",
-                    placeholder="1974 Alfa Romeo GTV",
+
+            import_key = f"imported_listing_{game['id']}_{player['id']}"
+
+            with st.form("import_advert_url"):
+                shortlist_url = st.text_input(
+                    "Advert URL",
+                    placeholder="https://...",
                 )
-                shortlist_price = c2.number_input(
-                    "Advertised price",
-                    min_value=0,
-                    max_value=int(game["total_budget"]),
-                    step=500,
-                )
-                shortlist_url = st.text_input("Advert URL")
-                c1, c2 = st.columns(2)
-                shortlist_year = c1.number_input(
-                    "Year",
-                    min_value=1885,
-                    max_value=2100,
-                    value=max(
-                        int(game["minimum_year"]),
-                        min(int(game["maximum_year"]), 1980),
-                    ),
-                )
-                shortlist_location = c2.text_input("Location")
-                save_shortlist = st.form_submit_button(
-                    "Save to shortlist",
+                import_advert = st.form_submit_button(
+                    "Import advert",
                     type="primary",
                 )
 
-            if save_shortlist:
-                if not shortlist_name.strip():
-                    st.error("Enter the vehicle name.")
+            if import_advert:
+                if not shortlist_url.strip():
+                    st.error("Paste an advert URL first.")
+                elif not is_safe_public_url(shortlist_url):
+                    st.error("Enter a valid public http or https advert URL.")
                 else:
-                    supabase.table("shortlist_items").insert(
-                        {
-                            "game_id": game["id"],
-                            "player_id": player["id"],
-                            "vehicle_name": shortlist_name.strip(),
-                            "vehicle_year": int(shortlist_year),
-                            "advertised_price": float(shortlist_price),
-                            "advert_url": shortlist_url.strip(),
-                            "vehicle_location": shortlist_location.strip(),
-                            "advert_type": "Private",
-                            "is_project": False,
-                            "import_status": "manual",
-                        }
-                    ).execute()
-                    st.success("Vehicle saved to your shortlist.")
+                    with st.spinner("Reading the advert..."):
+                        imported = extract_listing_data(shortlist_url.strip())
+                    imported["advert_url"] = shortlist_url.strip()
+                    st.session_state[import_key] = imported
+
+                    if imported["import_status"] == "failed":
+                        st.warning(
+                            "The site did not expose its advert details. "
+                            "The link has been retained so you can complete "
+                            "the fields manually."
+                        )
+                    else:
+                        st.success(
+                            "Advert imported. Check the details below before saving."
+                        )
                     st.rerun()
+
+            imported = st.session_state.get(import_key)
+
+            if imported:
+                st.subheader("Review imported advert")
+
+                image_url = imported.get("source_image_url")
+                if image_url:
+                    st.image(
+                        image_url,
+                        caption="Imported lead image",
+                        width=420,
+                    )
+                else:
+                    st.info(
+                        "No lead image was found. You can upload one after "
+                        "saving the item or before moving it to the garage."
+                    )
+
+                default_year = imported.get("vehicle_year")
+                if not default_year:
+                    default_year = max(
+                        int(game["minimum_year"]),
+                        min(int(game["maximum_year"]), 1980),
+                    )
+
+                default_price = imported.get("advertised_price")
+                if default_price is None:
+                    default_price = 0
+
+                advert_types = ["Private", "Dealer", "Auction", "Other"]
+                imported_type = imported.get("advert_type") or "Private"
+                type_index = (
+                    advert_types.index(imported_type)
+                    if imported_type in advert_types
+                    else 0
+                )
+
+                with st.form("review_imported_advert"):
+                    vehicle_name = st.text_input(
+                        "Year, make and model",
+                        value=imported.get("vehicle_name") or "",
+                    )
+
+                    c1, c2 = st.columns(2)
+                    advertised_price = c1.number_input(
+                        "Advertised price",
+                        min_value=0,
+                        max_value=int(game["total_budget"]),
+                        value=int(default_price),
+                        step=500,
+                    )
+                    vehicle_year = c2.number_input(
+                        "Year",
+                        min_value=1885,
+                        max_value=2100,
+                        value=int(default_year),
+                    )
+
+                    c1, c2 = st.columns(2)
+                    vehicle_location = c1.text_input(
+                        "Location",
+                        value=imported.get("vehicle_location") or "",
+                    )
+                    advert_type = c2.selectbox(
+                        "Advert type",
+                        advert_types,
+                        index=type_index,
+                    )
+
+                    description = st.text_area(
+                        "Advert description",
+                        value=imported.get("advert_description") or "",
+                        height=120,
+                    )
+
+                    source_image_url = st.text_input(
+                        "Lead image URL",
+                        value=imported.get("source_image_url") or "",
+                        help="Leave blank if no usable image was found.",
+                    )
+
+                    c1, c2 = st.columns(2)
+                    save_import = c1.form_submit_button(
+                        "Save to shortlist",
+                        type="primary",
+                        use_container_width=True,
+                    )
+                    cancel_import = c2.form_submit_button(
+                        "Cancel import",
+                        use_container_width=True,
+                    )
+
+                if cancel_import:
+                    st.session_state.pop(import_key, None)
+                    st.rerun()
+
+                if save_import:
+                    if not vehicle_name.strip():
+                        st.error(
+                            "Enter a vehicle name before saving it to the shortlist."
+                        )
+                    else:
+                        supabase.table("shortlist_items").insert(
+                            {
+                                "game_id": game["id"],
+                                "player_id": player["id"],
+                                "vehicle_name": vehicle_name.strip(),
+                                "vehicle_year": int(vehicle_year),
+                                "advertised_price": float(advertised_price),
+                                "advert_url": imported.get("advert_url") or "",
+                                "source_website": (
+                                    imported.get("source_website") or ""
+                                ),
+                                "vehicle_location": vehicle_location.strip(),
+                                "advert_description": description.strip(),
+                                "advert_type": advert_type,
+                                "is_project": False,
+                                "source_image_url": source_image_url.strip(),
+                                "import_status": imported.get(
+                                    "import_status", "partial"
+                                ),
+                            }
+                        ).execute()
+                        st.session_state.pop(import_key, None)
+                        st.success("Vehicle saved to your shortlist.")
+                        st.rerun()
 
         with manual_tab:
             if len(vehicles) < int(game["vehicle_count"]):

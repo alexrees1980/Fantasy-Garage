@@ -24,3 +24,20 @@ service_key = "sb_secret_YOUR_SECRET_KEY"
 ```
 
 Never commit the secret key to GitHub.
+
+## URL-first advert importer
+
+Players can paste an advert URL and the app will attempt to extract:
+
+- Vehicle title
+- Year
+- Advertised price
+- Location
+- Advert type
+- Description
+- Lead image
+- Source website
+
+All imported fields are shown in an editable review form before saving.
+Some websites may block or limit automated extraction, so manual completion
+and image upload remain available.
