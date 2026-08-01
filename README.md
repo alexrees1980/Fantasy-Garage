@@ -1,66 +1,34 @@
-# Fantasy Garage
+# The Car Vault v0.2.0
 
-A configurable multiplayer fantasy vehicle garage game built with Streamlit and Supabase.
+This release pivots the product from a standalone game into a personal vehicle
+vault, while preserving Fantasy Garage as an optional add-on.
 
-## Current features
+## Included
 
-- Create games with editable rules
-- Six-character game codes
-- Individual player PINs
-- Multi-browser and multi-device play
-- Persistent garages and valuations
-- Private vehicle prices and notes
-- Supabase image storage
-- Reveal, valuation and results stages
+- Personal vault profile protected by username and PIN
+- Permanent saved vehicle records independent of games
+- Collections
+- Tags, notes, status, mileage, source and price
+- URL import with manual fallback
+- Responsive three-column vault view
+- Search and collection filters
+- Archive function
+- Fantasy Garage retained inside the same Streamlit app
 
-## Streamlit secrets
+## Deployment order
 
-Add these in Streamlit Community Cloud:
+1. Open Supabase SQL Editor.
+2. Run `car_vault_migration_v020.sql`.
+3. Replace the current GitHub app files with this package.
+4. Commit and allow Streamlit to redeploy.
+5. Create your first vault profile and test manual/URL saving.
+6. Keep using browser extension v0.1.6 for Fantasy Garage for now.
 
-```toml
-[supabase]
-url = "https://YOUR-PROJECT.supabase.co"
-service_key = "sb_secret_YOUR_SECRET_KEY"
-```
+The next extension release will add a destination selector:
 
-Never commit the secret key to GitHub.
+- My Car Vault
+- Fantasy Garage
+- Both
 
-## URL-first advert importer
-
-Players can paste an advert URL and the app will attempt to extract:
-
-- Vehicle title
-- Year
-- Advertised price
-- Location
-- Advert type
-- Description
-- Lead image
-- Source website
-
-All imported fields are shown in an editable review form before saving.
-Some websites may block or limit automated extraction, so manual completion
-and image upload remain available.
-
-
-## Quick-capture shortlist flow
-
-The shortlist now treats automatic extraction as optional:
-
-1. Paste the advert URL.
-2. Continue manually or try automatic import.
-3. Enter only the vehicle name and price.
-4. Upload the advert's main image or a screenshot.
-5. Save to the private shortlist.
-
-Automatic extraction remains available for compatible public sites but is no
-longer required for the workflow.
-
-
-## Live shortlist update
-
-- The shortlist checks Supabase every five seconds.
-- A **Refresh now** button is also available.
-- Login links can prefill the game code and player name with:
-  `?game=ABC123&player=Alex`
-- The PIN is never included in the link or stored by this feature.
+This is deliberately deferred until the vault tables and login flow have been
+tested successfully.

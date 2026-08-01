@@ -8,13 +8,14 @@ import socket
 from urllib.parse import urljoin, urlparse
 
 import requests
+import re
 from bs4 import BeautifulSoup
 from typing import Any, Dict, List, Optional
 
 import streamlit as st
 from supabase import Client, create_client
 
-st.set_page_config(page_title="Fantasy Garage", page_icon="🏁", layout="wide")
+st.set_page_config(page_title="The Car Vault", page_icon="🚗", layout="wide")
 
 BUCKET_NAME = "vehicle-images"
 
@@ -42,6 +43,8 @@ def init_session() -> None:
         "game_id": None,
         "player_id": None,
         "is_organiser": False,
+        "vault_profile_id": None,
+        "product_area": "vault",
     }
     for key, value in defaults.items():
         st.session_state.setdefault(key, value)
@@ -665,6 +668,9 @@ def logout() -> None:
     st.session_state.game_id = None
     st.session_state.player_id = None
     st.session_state.is_organiser = False
+    st.session_state.product_area = (
+        "vault" if st.session_state.get("vault_profile_id") else "vault"
+    )
     st.rerun()
 
 
@@ -1661,9 +1667,570 @@ def app_page() -> None:
         results_page(game)
 
 
+
+
+# ---------------------------------------------------------------------------
+# THE CAR VAULT
+# ---------------------------------------------------------------------------
+
+def get_vault_profile(profile_id: str) -> Optional[Dict[str, Any]]:
+    result = (
+        supabase.table("vault_profiles")
+        .select("*")
+        .eq("id", profile_id)
+        .limit(1)
+        .execute()
+    )
+    return result.data[0] if result.data else None
+
+
+def get_vault_profile_by_name(profile_name: str) -> Optional[Dict[str, Any]]:
+    result = (
+        supabase.table("vault_profiles")
+        .select("*")
+        .eq("profile_name_key", profile_name.strip().lower())
+        .limit(1)
+        .execute()
+    )
+    return result.data[0] if result.data else None
+
+
+def get_collections(profile_id: str) -> List[Dict[str, Any]]:
+    return (
+        supabase.table("vault_collections")
+        .select("*")
+        .eq("profile_id", profile_id)
+        .order("created_at")
+        .execute()
+        .data
+        or []
+    )
+
+
+def get_vault_items(
+    profile_id: str,
+    collection_id: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    query = (
+        supabase.table("vault_items")
+        .select("*")
+        .eq("profile_id", profile_id)
+        .eq("is_archived", False)
+        .order("created_at", desc=True)
+    )
+    if collection_id:
+        query = query.eq("collection_id", collection_id)
+    return query.execute().data or []
+
+
+def vault_logout() -> None:
+    st.session_state.vault_profile_id = None
+    st.session_state.game_id = None
+    st.session_state.player_id = None
+    st.session_state.is_organiser = False
+    st.session_state.product_area = "vault"
+    st.rerun()
+
+
+def create_vault_profile() -> None:
+    st.subheader("Create your vault")
+
+    with st.form("create_vault_profile"):
+        display_name = st.text_input("Your name")
+        profile_name = st.text_input(
+            "Vault username",
+            help="Used to connect the desktop extension to your personal vault.",
+        )
+        pin = st.text_input("Vault PIN", type="password")
+        submitted = st.form_submit_button(
+            "Create my vault",
+            type="primary",
+            use_container_width=True,
+        )
+
+    if not submitted:
+        return
+
+    display_name = display_name.strip()
+    profile_name = profile_name.strip()
+
+    errors = []
+    if not display_name:
+        errors.append("Enter your name.")
+    if len(profile_name) < 3:
+        errors.append("Use a vault username of at least three characters.")
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", profile_name):
+        errors.append(
+            "Vault usernames can contain letters, numbers, dots, dashes and underscores."
+        )
+    if len(pin) < 4:
+        errors.append("Use a PIN of at least four characters.")
+    if get_vault_profile_by_name(profile_name):
+        errors.append("That vault username is already in use.")
+
+    if errors:
+        for error in errors:
+            st.error(error)
+        return
+
+    profile = (
+        supabase.table("vault_profiles")
+        .insert(
+            {
+                "display_name": display_name,
+                "profile_name": profile_name,
+                "profile_name_key": profile_name.lower(),
+                "pin_hash": hash_pin(pin),
+            }
+        )
+        .execute()
+        .data[0]
+    )
+
+    default_collection = (
+        supabase.table("vault_collections")
+        .insert(
+            {
+                "profile_id": profile["id"],
+                "collection_name": "Interesting finds",
+                "description": "Cars and vehicles worth remembering.",
+                "is_default": True,
+            }
+        )
+        .execute()
+        .data[0]
+    )
+
+    st.session_state.vault_profile_id = profile["id"]
+    st.session_state.product_area = "vault"
+    st.success("Your Car Vault is ready.")
+    st.rerun()
+
+
+def join_vault() -> None:
+    st.subheader("Open your vault")
+
+    query_profile = str(st.query_params.get("vault", "")).strip()
+
+    with st.form("join_vault"):
+        profile_name = st.text_input("Vault username", value=query_profile)
+        pin = st.text_input("Vault PIN", type="password")
+        submitted = st.form_submit_button(
+            "Open my vault",
+            type="primary",
+            use_container_width=True,
+        )
+
+    if not submitted:
+        return
+
+    profile = get_vault_profile_by_name(profile_name)
+    if not profile or not verify_pin(pin, profile["pin_hash"]):
+        st.error("Vault username or PIN is incorrect.")
+        return
+
+    st.session_state.vault_profile_id = profile["id"]
+    st.session_state.product_area = "vault"
+    st.query_params.clear()
+    st.rerun()
+
+
+def vault_landing_page() -> None:
+    st.title("🚗 The Car Vault")
+    st.markdown(
+        """
+        **Save interesting vehicles from across the web in one permanent,
+        organised place.** Build wishlists, track possible purchases, collect
+        unusual finds and use selected cars in Fantasy Garage games.
+        """
+    )
+
+    c1, c2, c3 = st.columns(3)
+    c1.info("**Save**\n\nKeep vehicle details, images, prices and advert links.")
+    c2.info("**Organise**\n\nUse collections for projects, bargains and dream cars.")
+    c3.info("**Play**\n\nFantasy Garage remains available as an optional game mode.")
+
+    st.divider()
+    left, right = st.columns(2)
+    with left:
+        join_vault()
+    with right:
+        create_vault_profile()
+
+    st.divider()
+    st.caption("Already joining a Fantasy Garage without a personal vault?")
+    if st.button("Open Fantasy Garage only"):
+        st.session_state.product_area = "fantasy"
+        st.rerun()
+
+
+def add_vault_item(profile: Dict[str, Any]) -> None:
+    st.header("Add a vehicle")
+
+    collections = get_collections(profile["id"])
+    collection_options = {
+        collection["collection_name"]: collection["id"]
+        for collection in collections
+    }
+
+    advert_url = st.text_input(
+        "Advert URL",
+        placeholder="https://...",
+        help="Paste a listing link. Import is best-effort; every field remains editable.",
+    )
+
+    imported = {}
+    if st.button("Try to read advert", disabled=not advert_url.strip()):
+        with st.spinner("Checking the advert..."):
+            imported = extract_listing_data(advert_url.strip())
+        st.session_state["vault_import"] = imported
+        if imported.get("import_status") == "failed":
+            st.warning("The website blocked automatic reading. Enter the details manually.")
+        else:
+            st.success("Advert checked. Review the details before saving.")
+
+    imported = st.session_state.get("vault_import", {})
+    imported_url = advert_url.strip() or imported.get("advert_url", "")
+
+    with st.form("add_vault_item_form", clear_on_submit=True):
+        c1, c2 = st.columns(2)
+        vehicle_name = c1.text_input(
+            "Vehicle",
+            value=imported.get("vehicle_name", ""),
+            placeholder="1974 Alfa Romeo GTV",
+        )
+        vehicle_year = c2.number_input(
+            "Year",
+            min_value=1885,
+            max_value=2100,
+            value=int(imported.get("vehicle_year") or 2000),
+        )
+
+        c1, c2, c3 = st.columns(3)
+        price = c1.number_input(
+            "Advertised price",
+            min_value=0.0,
+            value=float(imported.get("advertised_price") or 0),
+            step=100.0,
+        )
+        currency = c2.selectbox("Currency", ["€", "£", "$"])
+        mileage = c3.text_input("Mileage", placeholder="82,000 miles")
+
+        c1, c2 = st.columns(2)
+        location = c1.text_input(
+            "Location",
+            value=imported.get("vehicle_location", ""),
+        )
+        seller_type = c2.selectbox(
+            "Seller/listing type",
+            ["Private", "Dealer", "Auction"],
+            index=["Private", "Dealer", "Auction"].index(
+                imported.get("advert_type", "Private")
+                if imported.get("advert_type", "Private")
+                in ["Private", "Dealer", "Auction"]
+                else "Private"
+            ),
+        )
+
+        collection_name = st.selectbox(
+            "Collection",
+            list(collection_options) if collection_options else ["Unsorted"],
+        )
+        status = st.selectbox(
+            "Status",
+            ["Saved", "Watching", "Considering", "Contacted", "Sold", "Archived"],
+        )
+        tags = st.text_input(
+            "Tags",
+            placeholder="Alfa, coupe, project — separate with commas",
+        )
+        notes = st.text_area("My notes")
+        description = st.text_area(
+            "Advert summary",
+            value=imported.get("advert_description", ""),
+        )
+        image_url = st.text_input(
+            "Image URL",
+            value=imported.get("source_image_url", ""),
+        )
+        final_url = st.text_input("Saved advert URL", value=imported_url)
+
+        submitted = st.form_submit_button(
+            "Save to my vault",
+            type="primary",
+            use_container_width=True,
+        )
+
+    if not submitted:
+        return
+
+    if not vehicle_name.strip():
+        st.error("Enter a vehicle name.")
+        return
+
+    collection_id = collection_options.get(collection_name)
+
+    supabase.table("vault_items").insert(
+        {
+            "profile_id": profile["id"],
+            "collection_id": collection_id,
+            "vehicle_name": vehicle_name.strip(),
+            "vehicle_year": int(vehicle_year),
+            "advertised_price": float(price),
+            "currency_symbol": currency,
+            "mileage_text": mileage.strip(),
+            "vehicle_location": location.strip(),
+            "seller_type": seller_type,
+            "advert_url": final_url.strip(),
+            "source_website": (
+                urlparse(final_url.strip()).netloc.lower().removeprefix("www.")
+                if final_url.strip()
+                else ""
+            ),
+            "source_image_url": image_url.strip(),
+            "advert_description": description.strip(),
+            "personal_notes": notes.strip(),
+            "tags": [tag.strip() for tag in tags.split(",") if tag.strip()],
+            "item_status": status,
+            "import_status": imported.get("import_status", "manual"),
+        }
+    ).execute()
+
+    st.session_state.pop("vault_import", None)
+    st.success("Vehicle saved to your vault.")
+
+
+@st.fragment(run_every="8s")
+def vault_grid(profile: Dict[str, Any]) -> None:
+    collections = get_collections(profile["id"])
+    collection_names = {"All collections": None}
+    collection_names.update(
+        {
+            collection["collection_name"]: collection["id"]
+            for collection in collections
+        }
+    )
+
+    controls = st.columns([2, 2, 1])
+    selected_collection = controls[0].selectbox(
+        "Collection",
+        list(collection_names),
+        key="vault_collection_filter",
+    )
+    search_text = controls[1].text_input(
+        "Search your vault",
+        placeholder="Alfa, project, DoneDeal...",
+        key="vault_search",
+    )
+    if controls[2].button(
+        "Refresh",
+        use_container_width=True,
+        key="vault_refresh",
+    ):
+        st.rerun(scope="fragment")
+
+    items = get_vault_items(
+        profile["id"],
+        collection_names[selected_collection],
+    )
+
+    search_key = search_text.strip().lower()
+    if search_key:
+        items = [
+            item
+            for item in items
+            if search_key
+            in " ".join(
+                [
+                    item.get("vehicle_name", ""),
+                    item.get("vehicle_location", ""),
+                    item.get("source_website", ""),
+                    item.get("personal_notes", ""),
+                    " ".join(item.get("tags") or []),
+                ]
+            ).lower()
+        ]
+
+    if not items:
+        st.info("Nothing is saved here yet.")
+        return
+
+    st.caption(f"{len(items)} saved vehicle{'s' if len(items) != 1 else ''}")
+
+    for row_start in range(0, len(items), 3):
+        columns = st.columns(3)
+        for column, item in zip(columns, items[row_start:row_start + 3]):
+            with column:
+                with st.container(border=True):
+                    image_url = item.get("source_image_url")
+                    if item.get("image_path"):
+                        image_url = signed_image_url(item["image_path"])
+                    if image_url:
+                        st.image(image_url, use_container_width=True)
+
+                    st.write(f"**{item['vehicle_name']}**")
+                    details = []
+                    if item.get("vehicle_year"):
+                        details.append(str(item["vehicle_year"]))
+                    if item.get("vehicle_location"):
+                        details.append(item["vehicle_location"])
+                    st.caption(" · ".join(details) or "Saved vehicle")
+
+                    price = float(item.get("advertised_price") or 0)
+                    if price:
+                        st.metric(
+                            "Advertised",
+                            f"{item.get('currency_symbol', '€')}{price:,.0f}",
+                        )
+
+                    st.caption(
+                        f"{item.get('item_status', 'Saved')} · "
+                        f"{item.get('source_website') or 'Manual entry'}"
+                    )
+
+                    tags = item.get("tags") or []
+                    if tags:
+                        st.write(" ".join(f"`{tag}`" for tag in tags[:5]))
+
+                    if item.get("personal_notes"):
+                        st.write(item["personal_notes"])
+
+                    if item.get("advert_url"):
+                        st.link_button(
+                            "Open advert",
+                            item["advert_url"],
+                            use_container_width=True,
+                        )
+
+                    c1, c2 = st.columns(2)
+                    if c1.button(
+                        "Archive",
+                        key=f"archive_vault_{item['id']}",
+                        use_container_width=True,
+                    ):
+                        supabase.table("vault_items").update(
+                            {"is_archived": True, "item_status": "Archived"}
+                        ).eq("id", item["id"]).execute()
+                        st.rerun(scope="fragment")
+
+                    if c2.button(
+                        "Use in game",
+                        key=f"use_game_{item['id']}",
+                        use_container_width=True,
+                    ):
+                        st.session_state["game_import_item"] = item
+                        st.session_state.product_area = "fantasy"
+                        st.rerun()
+
+
+def collections_page(profile: Dict[str, Any]) -> None:
+    st.header("Collections")
+
+    with st.form("new_collection"):
+        c1, c2 = st.columns([2, 3])
+        name = c1.text_input("Collection name")
+        description = c2.text_input("Description")
+        submitted = st.form_submit_button("Create collection")
+
+    if submitted:
+        if not name.strip():
+            st.error("Enter a collection name.")
+        else:
+            supabase.table("vault_collections").insert(
+                {
+                    "profile_id": profile["id"],
+                    "collection_name": name.strip(),
+                    "description": description.strip(),
+                    "is_default": False,
+                }
+            ).execute()
+            st.success("Collection created.")
+            st.rerun()
+
+    collections = get_collections(profile["id"])
+    for collection in collections:
+        count_result = (
+            supabase.table("vault_items")
+            .select("id", count="exact")
+            .eq("profile_id", profile["id"])
+            .eq("collection_id", collection["id"])
+            .eq("is_archived", False)
+            .execute()
+        )
+        count = count_result.count or 0
+        with st.container(border=True):
+            c1, c2, c3 = st.columns([3, 5, 1])
+            c1.write(f"**{collection['collection_name']}**")
+            c2.write(collection.get("description") or "")
+            c3.metric("Saved", count)
+
+
+def fantasy_addon(profile: Dict[str, Any]) -> None:
+    st.header("🏁 Fantasy Garage")
+    st.write(
+        "Fantasy Garage is an optional game mode within The Car Vault. "
+        "Create a challenge or join an existing game using your usual game PIN."
+    )
+
+    imported_item = st.session_state.get("game_import_item")
+    if imported_item:
+        st.info(
+            f"Selected from your vault: **{imported_item['vehicle_name']}**. "
+            "Join the relevant game and add it to that game's shortlist."
+        )
+
+    landing_page()
+
+
+def vault_app() -> None:
+    profile = get_vault_profile(st.session_state.vault_profile_id)
+    if not profile:
+        vault_logout()
+        return
+
+    with st.sidebar:
+        st.title("The Car Vault")
+        st.write(f"**{profile['display_name']}**")
+        st.caption(f"Vault: {profile['profile_name']}")
+
+        area = st.radio(
+            "Go to",
+            ["My Vault", "Add vehicle", "Collections", "Fantasy Garage"],
+            key="vault_navigation",
+        )
+
+        st.divider()
+        if st.button("Log out of vault", use_container_width=True):
+            vault_logout()
+
+    st.title("🚗 The Car Vault")
+
+    if area == "My Vault":
+        st.header("My Vault")
+        st.write(
+            "Your permanent collection of interesting vehicles from across the web."
+        )
+        vault_grid(profile)
+    elif area == "Add vehicle":
+        add_vault_item(profile)
+    elif area == "Collections":
+        collections_page(profile)
+    else:
+        fantasy_addon(profile)
+
+
 init_session()
 
 if st.session_state.game_id and st.session_state.player_id:
     app_page()
-else:
+elif st.session_state.get("vault_profile_id"):
+    vault_app()
+elif st.session_state.get("product_area") == "fantasy":
+    st.title("🏁 Fantasy Garage")
     landing_page()
+    st.divider()
+    if st.button("Back to The Car Vault"):
+        st.session_state.product_area = "vault"
+        st.rerun()
+else:
+    vault_landing_page()
