@@ -32,3 +32,14 @@ The next extension release will add a destination selector:
 
 This is deliberately deferred until the vault tables and login flow have been
 tested successfully.
+
+
+## Version 0.2.1
+
+- Prevents Enter inside the add-vehicle form from submitting or clearing it.
+- Uses large, consistent 16:10 vehicle images in the vault.
+- Remembers a joined Fantasy Garage for the duration of the vault login.
+- Adds direct **Use in game** transfer from Vault to Fantasy Garage shortlist.
+- Adds **Save to vault** on Fantasy Garage shortlist items.
+- Adds a Back to The Car Vault action inside the game.
+- Disconnecting the game is separate from logging out of the vault.

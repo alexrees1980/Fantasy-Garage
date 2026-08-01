@@ -45,6 +45,10 @@ def init_session() -> None:
         "is_organiser": False,
         "vault_profile_id": None,
         "product_area": "vault",
+        "saved_game_id": None,
+        "saved_player_id": None,
+        "saved_is_organiser": False,
+        "pending_vault_item_id": None,
     }
     for key, value in defaults.items():
         st.session_state.setdefault(key, value)
@@ -850,6 +854,9 @@ def join_game() -> None:
     st.session_state.game_id = game["id"]
     st.session_state.player_id = player["id"]
     st.session_state.is_organiser = bool(player["is_organiser"])
+    st.session_state.saved_game_id = game["id"]
+    st.session_state.saved_player_id = player["id"]
+    st.session_state.saved_is_organiser = bool(player["is_organiser"])
     st.query_params.clear()
     st.rerun()
 
@@ -1639,6 +1646,13 @@ def app_page() -> None:
 
     with st.sidebar:
         st.title("Fantasy Garage")
+        if st.session_state.get("vault_profile_id"):
+            if st.button("← Back to The Car Vault", use_container_width=True):
+                st.session_state.game_id = None
+                st.session_state.player_id = None
+                st.session_state.is_organiser = False
+                st.session_state.product_area = "vault"
+                st.rerun()
         st.write(f"**Game:** {game['game_code']}")
         st.write(f"**Player:** {player['player_name']}")
         st.write(f"**Stage:** {game['stage'].title()}")
@@ -1728,6 +1742,10 @@ def vault_logout() -> None:
     st.session_state.game_id = None
     st.session_state.player_id = None
     st.session_state.is_organiser = False
+    st.session_state.saved_game_id = None
+    st.session_state.saved_player_id = None
+    st.session_state.saved_is_organiser = False
+    st.session_state.pending_vault_item_id = None
     st.session_state.product_area = "vault"
     st.rerun()
 
@@ -1892,7 +1910,9 @@ def add_vault_item(profile: Dict[str, Any]) -> None:
     imported = st.session_state.get("vault_import", {})
     imported_url = advert_url.strip() or imported.get("advert_url", "")
 
-    with st.form("add_vault_item_form", clear_on_submit=True):
+    st.caption("Fields are only saved when you click **Save to my vault**. Pressing Enter inside a field will not clear the entry.")
+
+    with st.form("add_vault_item_form", clear_on_submit=False, enter_to_submit=False):
         c1, c2 = st.columns(2)
         vehicle_name = c1.text_input(
             "Vehicle",
@@ -1998,6 +2018,7 @@ def add_vault_item(profile: Dict[str, Any]) -> None:
 
     st.session_state.pop("vault_import", None)
     st.success("Vehicle saved to your vault.")
+    st.rerun()
 
 
 @st.fragment(run_every="8s")
@@ -2065,8 +2086,47 @@ def vault_grid(profile: Dict[str, Any]) -> None:
                     image_url = item.get("source_image_url")
                     if item.get("image_path"):
                         image_url = signed_image_url(item["image_path"])
+
                     if image_url:
-                        st.image(image_url, use_container_width=True)
+                        st.markdown(
+                            f"""
+                            <div style="
+                                width:100%;
+                                aspect-ratio:16/10;
+                                overflow:hidden;
+                                border-radius:12px;
+                                background:#f1f3f6;
+                                margin-bottom:0.75rem;">
+                                <img
+                                    src="{image_url}"
+                                    alt="{item.get('vehicle_name', 'Saved vehicle')}"
+                                    style="
+                                        width:100%;
+                                        height:100%;
+                                        object-fit:cover;
+                                        display:block;">
+                            </div>
+                            """,
+                            unsafe_allow_html=True,
+                        )
+                    else:
+                        st.markdown(
+                            """
+                            <div style="
+                                width:100%;
+                                aspect-ratio:16/10;
+                                border-radius:12px;
+                                background:#f1f3f6;
+                                display:flex;
+                                align-items:center;
+                                justify-content:center;
+                                color:#6b7280;
+                                margin-bottom:0.75rem;">
+                                No image available
+                            </div>
+                            """,
+                            unsafe_allow_html=True,
+                        )
 
                     st.write(f"**{item['vehicle_name']}**")
                     details = []
@@ -2118,9 +2178,21 @@ def vault_grid(profile: Dict[str, Any]) -> None:
                         key=f"use_game_{item['id']}",
                         use_container_width=True,
                     ):
-                        st.session_state["game_import_item"] = item
-                        st.session_state.product_area = "fantasy"
-                        st.rerun()
+                        if (
+                            st.session_state.get("saved_game_id")
+                            and st.session_state.get("saved_player_id")
+                        ):
+                            move_vault_item_to_game_shortlist(
+                                item,
+                                st.session_state.saved_game_id,
+                                st.session_state.saved_player_id,
+                            )
+                            st.success("Vehicle added to your Fantasy Garage shortlist.")
+                        else:
+                            st.session_state.pending_vault_item_id = item["id"]
+                            st.session_state.product_area = "fantasy"
+                            st.warning("Join a Fantasy Garage once, then this car can be added directly.")
+                            st.rerun()
 
 
 def collections_page(profile: Dict[str, Any]) -> None:
@@ -2165,20 +2237,189 @@ def collections_page(profile: Dict[str, Any]) -> None:
             c3.metric("Saved", count)
 
 
+
+def move_vault_item_to_game_shortlist(
+    item: Dict[str, Any],
+    game_id: str,
+    player_id: str,
+) -> None:
+    duplicate = (
+        supabase.table("shortlist_items")
+        .select("id")
+        .eq("game_id", game_id)
+        .eq("player_id", player_id)
+        .eq("advert_url", item.get("advert_url") or "")
+        .limit(1)
+        .execute()
+    )
+    if duplicate.data:
+        st.info("That advert is already in your Fantasy Garage shortlist.")
+        return
+
+    supabase.table("shortlist_items").insert(
+        {
+            "game_id": game_id,
+            "player_id": player_id,
+            "vehicle_name": item["vehicle_name"],
+            "vehicle_year": item.get("vehicle_year"),
+            "advertised_price": float(item.get("advertised_price") or 0),
+            "advert_url": item.get("advert_url") or "",
+            "source_website": item.get("source_website") or "",
+            "vehicle_location": item.get("vehicle_location") or "",
+            "advert_description": item.get("advert_description") or "",
+            "advert_type": item.get("seller_type") or "Private",
+            "is_project": False,
+            "image_path": item.get("image_path"),
+            "source_image_url": item.get("source_image_url") or "",
+            "import_status": "vault",
+        }
+    ).execute()
+
+
+def save_game_shortlist_item_to_vault(
+    shortlist_item: Dict[str, Any],
+    profile_id: str,
+) -> None:
+    default_collection = (
+        supabase.table("vault_collections")
+        .select("id")
+        .eq("profile_id", profile_id)
+        .eq("is_default", True)
+        .limit(1)
+        .execute()
+    )
+    collection_id = default_collection.data[0]["id"] if default_collection.data else None
+
+    existing = (
+        supabase.table("vault_items")
+        .select("id")
+        .eq("profile_id", profile_id)
+        .eq("advert_url", shortlist_item.get("advert_url") or "")
+        .limit(1)
+        .execute()
+    )
+    if existing.data:
+        st.info("That advert is already saved in your vault.")
+        return
+
+    supabase.table("vault_items").insert(
+        {
+            "profile_id": profile_id,
+            "collection_id": collection_id,
+            "vehicle_name": shortlist_item["vehicle_name"],
+            "vehicle_year": shortlist_item.get("vehicle_year"),
+            "advertised_price": float(shortlist_item.get("advertised_price") or 0),
+            "currency_symbol": "€",
+            "mileage_text": "",
+            "vehicle_location": shortlist_item.get("vehicle_location") or "",
+            "seller_type": shortlist_item.get("advert_type") or "Private",
+            "advert_url": shortlist_item.get("advert_url") or "",
+            "source_website": shortlist_item.get("source_website") or "",
+            "source_image_url": shortlist_item.get("source_image_url") or "",
+            "image_path": shortlist_item.get("image_path"),
+            "advert_description": shortlist_item.get("advert_description") or "",
+            "personal_notes": "",
+            "tags": ["Fantasy Garage"],
+            "item_status": "Saved",
+            "import_status": "game",
+        }
+    ).execute()
+
+
 def fantasy_addon(profile: Dict[str, Any]) -> None:
     st.header("🏁 Fantasy Garage")
     st.write(
-        "Fantasy Garage is an optional game mode within The Car Vault. "
-        "Create a challenge or join an existing game using your usual game PIN."
+        "Fantasy Garage is an optional game mode within The Car Vault."
     )
 
-    imported_item = st.session_state.get("game_import_item")
-    if imported_item:
-        st.info(
-            f"Selected from your vault: **{imported_item['vehicle_name']}**. "
-            "Join the relevant game and add it to that game's shortlist."
-        )
+    if (
+        st.session_state.get("saved_game_id")
+        and st.session_state.get("saved_player_id")
+    ):
+        game = get_game(st.session_state.saved_game_id)
+        player = get_player(st.session_state.saved_player_id)
 
+        if game and player:
+            st.success(
+                f"Connected to game **{game['game_code']}** as **{player['player_name']}**."
+            )
+
+            pending_id = st.session_state.get("pending_vault_item_id")
+            if pending_id:
+                pending = (
+                    supabase.table("vault_items")
+                    .select("*")
+                    .eq("id", pending_id)
+                    .eq("profile_id", profile["id"])
+                    .limit(1)
+                    .execute()
+                )
+                if pending.data:
+                    move_vault_item_to_game_shortlist(
+                        pending.data[0],
+                        game["id"],
+                        player["id"],
+                    )
+                    st.success("Selected vault vehicle added to the game shortlist.")
+                st.session_state.pending_vault_item_id = None
+
+            c1, c2 = st.columns(2)
+            if c1.button(
+                "Open connected game",
+                type="primary",
+                use_container_width=True,
+            ):
+                st.session_state.game_id = game["id"]
+                st.session_state.player_id = player["id"]
+                st.session_state.is_organiser = bool(player["is_organiser"])
+                st.rerun()
+
+            if c2.button(
+                "Disconnect game",
+                use_container_width=True,
+            ):
+                st.session_state.saved_game_id = None
+                st.session_state.saved_player_id = None
+                st.session_state.saved_is_organiser = False
+                st.rerun()
+
+            st.divider()
+            st.subheader("Game shortlist")
+            shortlist = get_shortlist_items(game["id"], player["id"])
+            if not shortlist:
+                st.info("No vehicles are currently in this game shortlist.")
+            else:
+                for item in shortlist:
+                    with st.container(border=True):
+                        c1, c2 = st.columns([4, 1])
+                        c1.write(f"**{item['vehicle_name']}**")
+                        c1.caption(
+                            " · ".join(
+                                filter(
+                                    None,
+                                    [
+                                        str(item.get("vehicle_year") or ""),
+                                        item.get("vehicle_location") or "",
+                                    ],
+                                )
+                            )
+                        )
+                        if c2.button(
+                            "Save to vault",
+                            key=f"save_game_to_vault_{item['id']}",
+                            use_container_width=True,
+                        ):
+                            save_game_shortlist_item_to_vault(
+                                item,
+                                profile["id"],
+                            )
+                            st.success("Vehicle saved to your personal vault.")
+            return
+
+    st.info(
+        "Join a Fantasy Garage once and this vault session will remember the game "
+        "until you disconnect it or log out of the vault."
+    )
     landing_page()
 
 
