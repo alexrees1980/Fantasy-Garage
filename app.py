@@ -1912,7 +1912,7 @@ def add_vault_item(profile: Dict[str, Any]) -> None:
 
     st.caption("Fields are only saved when you click **Save to my vault**. Pressing Enter inside a field will not clear the entry.")
 
-    with st.form("add_vault_item_form", clear_on_submit=False, enter_to_submit=False):
+    with st.form("add_vault_item_form", clear_on_submit=True, enter_to_submit=False):
         c1, c2 = st.columns(2)
         vehicle_name = c1.text_input(
             "Vehicle",
@@ -1988,6 +1988,23 @@ def add_vault_item(profile: Dict[str, Any]) -> None:
         st.error("Enter a vehicle name.")
         return
 
+    if final_url.strip():
+        duplicate = (
+            supabase.table("vault_items")
+            .select("id, vehicle_name")
+            .eq("profile_id", profile["id"])
+            .eq("advert_url", final_url.strip())
+            .eq("is_archived", False)
+            .limit(1)
+            .execute()
+        )
+        if duplicate.data:
+            st.warning(
+                f"This advert is already saved as "
+                f"**{duplicate.data[0]['vehicle_name']}**."
+            )
+            return
+
     collection_id = collection_options.get(collection_name)
 
     supabase.table("vault_items").insert(
@@ -2018,7 +2035,7 @@ def add_vault_item(profile: Dict[str, Any]) -> None:
 
     st.session_state.pop("vault_import", None)
     st.success("Vehicle saved to your vault.")
-    st.rerun()
+    st.caption("The form has been cleared and the vehicle is now visible in My Vault.")
 
 
 @st.fragment(run_every="8s")
@@ -2182,17 +2199,49 @@ def vault_grid(profile: Dict[str, Any]) -> None:
                             st.session_state.get("saved_game_id")
                             and st.session_state.get("saved_player_id")
                         ):
-                            move_vault_item_to_game_shortlist(
+                            moved = move_vault_item_to_game_shortlist(
                                 item,
                                 st.session_state.saved_game_id,
                                 st.session_state.saved_player_id,
                             )
-                            st.success("Vehicle added to your Fantasy Garage shortlist.")
+                            if moved:
+                                st.success("Vehicle added to your Fantasy Garage shortlist.")
                         else:
                             st.session_state.pending_vault_item_id = item["id"]
                             st.session_state.product_area = "fantasy"
                             st.warning("Join a Fantasy Garage once, then this car can be added directly.")
                             st.rerun()
+
+                    confirm_key = f"confirm_delete_vault_{item['id']}"
+                    if not st.session_state.get(confirm_key):
+                        if st.button(
+                            "Delete permanently",
+                            key=f"delete_vault_{item['id']}",
+                            use_container_width=True,
+                        ):
+                            st.session_state[confirm_key] = True
+                            st.rerun(scope="fragment")
+                    else:
+                        st.warning("Permanently delete this saved vehicle?")
+                        d1, d2 = st.columns(2)
+                        if d1.button(
+                            "Yes, delete",
+                            key=f"confirm_yes_{item['id']}",
+                            type="primary",
+                            use_container_width=True,
+                        ):
+                            supabase.table("vault_items").delete().eq(
+                                "id", item["id"]
+                            ).eq("profile_id", profile["id"]).execute()
+                            st.session_state.pop(confirm_key, None)
+                            st.rerun(scope="fragment")
+                        if d2.button(
+                            "Cancel",
+                            key=f"confirm_no_{item['id']}",
+                            use_container_width=True,
+                        ):
+                            st.session_state.pop(confirm_key, None)
+                            st.rerun(scope="fragment")
 
 
 def collections_page(profile: Dict[str, Any]) -> None:
@@ -2242,28 +2291,30 @@ def move_vault_item_to_game_shortlist(
     item: Dict[str, Any],
     game_id: str,
     player_id: str,
-) -> None:
-    duplicate = (
-        supabase.table("shortlist_items")
-        .select("id")
-        .eq("game_id", game_id)
-        .eq("player_id", player_id)
-        .eq("advert_url", item.get("advert_url") or "")
-        .limit(1)
-        .execute()
-    )
-    if duplicate.data:
-        st.info("That advert is already in your Fantasy Garage shortlist.")
-        return
-
-    supabase.table("shortlist_items").insert(
-        {
+) -> bool:
+    try:
+        advert_url = item.get("advert_url") or ""
+        duplicate_query = (
+            supabase.table("shortlist_items")
+            .select("id")
+            .eq("game_id", game_id)
+            .eq("player_id", player_id)
+        )
+        if advert_url:
+            duplicate_query = duplicate_query.eq("advert_url", advert_url)
+        else:
+            duplicate_query = duplicate_query.eq("vehicle_name", item["vehicle_name"])
+        duplicate = duplicate_query.limit(1).execute()
+        if duplicate.data:
+            st.info("That vehicle is already in your Fantasy Garage shortlist.")
+            return False
+        supabase.table("shortlist_items").insert({
             "game_id": game_id,
             "player_id": player_id,
             "vehicle_name": item["vehicle_name"],
             "vehicle_year": item.get("vehicle_year"),
             "advertised_price": float(item.get("advertised_price") or 0),
-            "advert_url": item.get("advert_url") or "",
+            "advert_url": advert_url,
             "source_website": item.get("source_website") or "",
             "vehicle_location": item.get("vehicle_location") or "",
             "advert_description": item.get("advert_description") or "",
@@ -2271,9 +2322,12 @@ def move_vault_item_to_game_shortlist(
             "is_project": False,
             "image_path": item.get("image_path"),
             "source_image_url": item.get("source_image_url") or "",
-            "import_status": "vault",
-        }
-    ).execute()
+            "import_status": "manual",
+        }).execute()
+        return True
+    except Exception as error:
+        st.error("The vehicle could not be added to the game shortlist. " f"Details: {error}")
+        return False
 
 
 def save_game_shortlist_item_to_vault(
@@ -2321,7 +2375,7 @@ def save_game_shortlist_item_to_vault(
             "personal_notes": "",
             "tags": ["Fantasy Garage"],
             "item_status": "Saved",
-            "import_status": "game",
+            "import_status": "manual",
         }
     ).execute()
 
@@ -2355,12 +2409,13 @@ def fantasy_addon(profile: Dict[str, Any]) -> None:
                     .execute()
                 )
                 if pending.data:
-                    move_vault_item_to_game_shortlist(
+                    moved = move_vault_item_to_game_shortlist(
                         pending.data[0],
                         game["id"],
                         player["id"],
                     )
-                    st.success("Selected vault vehicle added to the game shortlist.")
+                    if moved:
+                        st.success("Selected vault vehicle added to the game shortlist.")
                 st.session_state.pending_vault_item_id = None
 
             c1, c2 = st.columns(2)

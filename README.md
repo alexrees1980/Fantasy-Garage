@@ -43,3 +43,12 @@ tested successfully.
 - Adds **Save to vault** on Fantasy Garage shortlist items.
 - Adds a Back to The Car Vault action inside the game.
 - Disconnecting the game is separate from logging out of the vault.
+
+
+## Version 0.2.2
+
+- Fixes Vault to Fantasy Garage transfers.
+- Prevents pending-transfer crashes.
+- Clears the add form after a successful save.
+- Prevents duplicate active adverts.
+- Adds permanent deletion with confirmation.
