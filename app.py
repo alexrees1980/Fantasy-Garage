@@ -963,11 +963,33 @@ def show_vehicle(
 
         with c1:
             image_url = signed_image_url(vehicle.get("image_path"))
+            if not image_url:
+                image_url = vehicle.get("source_image_url") or ""
+
             if image_url:
-                st.image(image_url, use_container_width=True)
+                st.markdown(
+                    f"""
+                    <div style="
+                        width:100%;
+                        aspect-ratio:16/10;
+                        overflow:hidden;
+                        border-radius:12px;
+                        background:#f1f3f6;">
+                        <img
+                            src="{image_url}"
+                            alt="{vehicle.get('vehicle_name', 'Garage vehicle')}"
+                            style="
+                                width:100%;
+                                height:100%;
+                                object-fit:cover;
+                                display:block;">
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
             else:
                 st.markdown("## 🚗")
-                st.caption("No image uploaded")
+                st.caption("No image available")
 
         with c2:
             st.subheader(vehicle["vehicle_name"])
@@ -1139,6 +1161,7 @@ def live_shortlist(
                         "is_project": bool(item.get("is_project")),
                         "private_notes": item.get("advert_description") or "",
                         "image_path": final_image_path,
+                        "source_image_url": item.get("source_image_url") or "",
                     }
 
                     errors = validate_vehicle(game, vehicles, vehicle_data)
@@ -1450,6 +1473,7 @@ def build_garage(game: Dict[str, Any], player: Dict[str, Any]) -> None:
                         "is_project": bool(is_project),
                         "private_notes": notes.strip(),
                         "image_path": None,
+                        "source_image_url": "",
                     }
 
                     errors = validate_vehicle(game, vehicles, vehicle_data)

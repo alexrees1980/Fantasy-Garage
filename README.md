@@ -52,3 +52,11 @@ tested successfully.
 - Clears the add form after a successful save.
 - Prevents duplicate active adverts.
 - Adds permanent deletion with confirmation.
+
+
+## Version 0.2.3
+
+- Keeps the original advert image URL when moving a shortlist item into a garage.
+- Garage cards prefer the Supabase-stored image but fall back to the advert image.
+- Uses a consistent large 16:10 image frame in Fantasy Garage.
+- Includes a migration adding `source_image_url` to the `vehicles` table.
